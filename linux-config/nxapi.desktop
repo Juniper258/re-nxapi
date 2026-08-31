@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Nintendo Switch Online
+GenericName=Nintendo Switch Rich Presence
+Comment=Nintendo Switch Online client and Discord Rich Presence
+Exec=Nintendo.Switch.Online-Linux.AppImage %U
+Icon=nxapi
+Type=Application
+StartupWMClass=nxapi-app
+Categories=Game;Network;Utility;
+Terminal=false

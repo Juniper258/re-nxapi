@@ -1,0 +1,539 @@
+# Created by Deltaion Lee (MCMi460) on Github
+
+import requests
+import json
+import uuid
+import time
+import sys
+import webbrowser
+import base64
+import os
+import platform
+import hashlib
+import re
+import pickle
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+requests.packages.urllib3.disable_warnings()
+
+fTokenAPIURL = "https://api.imink.app"
+fTokenAltURL = "https://nxapi-znca-api.fancy.org.uk"
+fTokenVersion = None
+
+_orig_request = requests.Session.request
+def _patched_request(self, *args, **kwargs):
+    kwargs.setdefault('verify', False)
+    return _orig_request(self, *args, **kwargs)
+requests.Session.request = _patched_request
+
+_orig_get = requests.get
+_orig_post = requests.post
+def _patched_get(*args, **kwargs):
+    kwargs.setdefault('verify', False)
+    return _orig_get(*args, **kwargs)
+def _patched_post(*args, **kwargs):
+    kwargs.setdefault('verify', False)
+    return _orig_post(*args, **kwargs)
+requests.get = _patched_get
+requests.post = _patched_post
+
+
+def getIminkNSOVersion():
+    global fTokenVersion
+    if fTokenVersion == None:
+        route = '/config'
+        try:
+            response = requests.get(fTokenAPIURL + route, verify=False, timeout=10)
+            response.raise_for_status()
+            fTokenVersion = json.loads(response.text)['nso_version']
+            return fTokenVersion
+        except Exception as e:
+            print('[NSO-RPC] imink API unavailable (%s), using fallback version' % e)
+            fTokenVersion = '2.10.0'
+            return fTokenVersion
+    return fTokenVersion
+
+
+def getPath(path):
+    try:
+        root = sys._MEIPASS
+    except Exception:
+        root = os.path.abspath('.')
+
+    return os.path.join(root, path)
+
+
+# Get Version Info
+try:
+    with open(getPath('version.txt'), 'r') as file:
+        versionTag = file.read().rstrip()
+        try:
+            versionTag = versionTag.split('-', 1)
+        except ValueError:
+            versionTag = [versionTag, '']
+except:
+    versionTag = ['', '']
+
+
+def getAppPath():
+    # Check for macOS platform and NSO-RPC freeze status
+    if sys.platform.startswith('darwin') and hasattr(sys, 'frozen') and sys.frozen == 'macosx_app':
+        app_root_folder = os.path.dirname(re.search(r'(.*/NSO-RPC\.app)/', os.path.abspath(__file__)).group(1))
+
+        # Check if NSO-RPC_Data exists
+        potential_data_path = os.path.join(app_root_folder, 'NSO-RPC_Data')
+        if os.path.isdir(potential_data_path):
+            return potential_data_path
+        else:
+            return os.path.expanduser('~/Documents/NSO-RPC')
+
+    # Windows allows you to move your UserProfile subfolders, Such as Documents, Videos, Music etc.
+    # However os.path.expanduser does not actually check and assumes its in the default location.
+    # This tries to correctly resolve the Documents path and fallbacks to default if it fails.
+    application_path = os.path.expanduser('~/Documents/NSO-RPC')
+    if platform.system() == 'Windows':
+        try:
+            import ctypes.wintypes
+            CSIDL_PERSONAL = 5  # My Documents
+            SHGFP_TYPE_CURRENT = 0  # Get current, not default value
+            buf = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
+            ctypes.windll.shell32.SHGetFolderPathW(None, CSIDL_PERSONAL, None, SHGFP_TYPE_CURRENT, buf)
+            application_path = os.path.join(buf.value, 'NSO-RPC')
+        except:
+            pass
+
+    # Use Portable path if it exists, else use Default path
+    portable_data_path = os.path.join(os.getcwd(), 'NSO-RPC_Data')
+    return portable_data_path if os.path.isdir(portable_data_path) else application_path
+
+
+def Restart_NSORPC():
+    args = [sys.executable] + sys.argv
+    os.execl(sys.executable, *args)
+
+
+def log(info, time = time.time()):
+    path = getAppPath()
+    if not os.path.isdir(path):
+        os.mkdir(path)
+    with open(os.path.join(path, 'logs.txt'), 'a') as file:
+        file.write('%s: %s\n' % (time, info))
+    return info
+
+
+client_id = '71b963c1b7b6d119'
+version = 0.3
+nsoAppVersion = None
+languages = [  # ISO Language codes
+    'en-US',
+    'es-MX',
+    'fr-CA',
+    'ja-JP',
+    'en-GB',
+    'es-ES',
+    'fr-FR',
+    'de-DE',
+    'it-IT',
+    'nl-NL',
+    'ru-RU'
+]
+
+
+class API():
+    def __init__(self, session_token, user_lang, targetID, version):
+        global nsoAppVersion
+        nsoAppVersion = getIminkNSOVersion()
+        self.headers = {
+            'X-ProductVersion': nsoAppVersion,
+            'X-Platform': 'iOS',
+            'User-Agent': 'Coral/%s (com.nintendo.znca; build:1999; iOS 15.5.0) Alamofire/5.4.4' % nsoAppVersion,
+            'Accept': 'application/json',
+            'Content-Type': 'application/json; charset=utf-8',
+            'Host': 'api-lp1.znc.srv.nintendo.net',
+            'Connection': 'Keep-Alive',
+            'Accept-Encoding': 'gzip',
+        }
+
+        self.user_lang = user_lang
+        self.session_token = session_token
+        self.targetID = targetID
+        self.refreshAccessToken()
+        self.guid = str(uuid.uuid4())
+
+        self.url = 'https://api-lp1.znc.srv.nintendo.net'
+
+        self.userInfo = UsersMe(self.accessToken, self.user_lang).get()
+        self.login = {
+            'login': None,
+            'time': 0,
+        }
+
+        self.friends = []
+
+        path = getAppPath()
+        if not os.path.isdir(path):
+            os.mkdir(path)
+        with open(os.path.join(path, 'private.txt'), 'w') as file:
+            file.write(json.dumps({
+                'session_token': self.session_token,
+                'user_lang': self.user_lang,
+                'targetID': self.targetID,
+            }))
+
+    def makeRequest(self, route):
+        return requests.post(self.url + route, headers = self.headers, verify=False)
+
+    def refreshAccessToken(self):
+        self.tokenResponse = Nintendo(self.session_token, self.user_lang).getServiceToken()
+        self.id_token = self.tokenResponse['id_token']
+        self.accessToken = self.tokenResponse['access_token']
+        self.refreshLast = time.time()
+        return self.accessToken
+
+    def updateLogin(self):
+        path = os.path.join(getAppPath(), 'tempToken.txt')
+        if os.path.isfile(path):
+            with open(path, 'rb') as file:
+                self.login = pickle.loads(file.read())
+                try:
+                    self.headers['Authorization'] = 'Bearer %s' % self.login['login'].account['result'].get('webApiServerCredential').get('accessToken')
+                except Exception as e:
+                    log('Failure with authorization: %s\nLogin returns %s' % (e, self.login['login'].account))
+                    raise e
+                log('Login from file')
+        if time.time() - self.login['time'] < 7170:
+            return
+        if time.time() - self.refreshLast > 120:
+            self.refreshAccessToken()
+        login = Login(self.userInfo, self.user_lang, self.accessToken, self.guid)
+        login.loginToAccount()
+        try:
+            self.headers['Authorization'] = 'Bearer %s' % login.account['result'].get('webApiServerCredential').get('accessToken')  # Add authorization token
+        except Exception as e:
+            raise Exception('Failure with authorization: %s\nLogin returns %s' % (e, login.account))
+        self.login = {
+            'login': login,
+            'time': time.time(),
+        }
+        with open(path, 'wb') as file:
+            file.write(pickle.dumps(self.login))
+
+    def getSelf(self):
+        self.getFriends()
+
+        if not self.targetID:
+            route = '/v3/User/ShowSelf'
+
+            response = self.makeRequest(route)
+            self.user = User(json.loads(response.text)['result'])
+        else:
+            response = next(x for x in self.friends if x.nsaId == self.targetID)
+            self.user = response
+
+    def getFriends(self):
+        list = FriendList()
+        list.populateList(self)
+        self.friends = list.friendList
+
+
+class Nintendo():
+    def __init__(self, sessionToken, userLang):
+        self.headers = {
+            'User-Agent': 'Coral/%s (com.nintendo.znca; build:1999; iOS 15.5.0) Alamofire/5.4.4' % nsoAppVersion,
+            'Accept': 'application/json',
+            'Accept-Language': userLang,
+            'Accept-Encoding': 'gzip, deflate',
+        }
+        self.body = {
+            'client_id': client_id,
+            'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer-session-token',
+            'session_token': sessionToken,
+        }
+
+        self.url = 'https://accounts.nintendo.com'
+
+    def getServiceToken(self):
+        route = '/connect/1.0.0/api/token'
+        response = requests.post(self.url + route, headers = self.headers, json = self.body, verify=False)
+        return json.loads(response.text)
+
+
+class UsersMe():
+    def __init__(self, accessToken, userLang):
+        self.headers = {
+            'User-Agent': 'Coral/%s (com.nintendo.znca; build:1999; iOS 15.5.0) Alamofire/5.4.4' % nsoAppVersion,
+            'Accept': 'application/json',
+            'Accept-Language': userLang,
+            'Authorization': 'Bearer %s' % accessToken,
+            'Host': 'api.accounts.nintendo.com',
+            'Connection': 'Keep-Alive',
+            'Accept-Encoding': 'gzip',
+        }
+        self.url = 'https://api.accounts.nintendo.com'
+
+    def get(self):
+        route = '/2.0.0/users/me'
+
+        response = requests.get(self.url + route, headers = self.headers, verify=False)
+        return json.loads(response.text)
+
+
+class imink():
+    def __init__(self, na_id, id_token, timestamp, guid, iteration):
+        self.headers = {
+            'User-Agent': 'NSO-RPC/%s' % "-".join(versionTag),
+            'Content-Type': 'application/json; charset=utf-8',
+        }
+        self.body = {
+            'token': id_token,
+            'hash_method': str(iteration),
+            'na_id': na_id,
+        }
+
+        self.url = fTokenAPIURL
+        self.alt_url = fTokenAltURL
+
+    def get(self):
+        log('Login from imink')
+        route = '/f'
+
+        try:
+            response = requests.post(self.url + route, headers = self.headers, data = json.dumps(self.body), verify=False, timeout=15)
+            result = json.loads(response.text)
+            if 'error' not in result and result.get('error') is None:
+                return result
+            raise Exception('imink returned error: %s' % result)
+        except Exception as e:
+            log('imink API failed (%s), trying nxapi-znca-api...' % e)
+
+        alt_headers = {
+            'User-Agent': 'NSO-RPC/%s' % "-".join(versionTag),
+            'Content-Type': 'application/json; charset=utf-8',
+        }
+        alt_body = {
+            'token': self.body['token'],
+            'hash_method': self.body['hash_method'],
+        }
+        try:
+            response = requests.post(self.alt_url + route, headers = alt_headers, data = json.dumps(alt_body), verify=False, timeout=15)
+            result = json.loads(response.text)
+            if 'f' in result:
+                return result
+            raise Exception('nxapi-znca-api returned error: %s' % result)
+        except Exception as e2:
+            log('nxapi-znca-api also failed (%s)' % e2)
+            raise RuntimeError(
+                'All f-token APIs are currently unavailable.\n'
+                'imink (api.imink.app): SSL certificate expired\n'
+                'nxapi-znca-api: %s\n\n'
+                'This is a known issue. Nintendo has recently broken third-party tools.' % e2
+            ) from None
+
+
+class Login():
+    def __init__(self, userInfo, userLang, accessToken, guid):
+        self.headers = {
+            'Host': 'api-lp1.znc.srv.nintendo.net',
+            'Accept-Language': userLang,
+            'User-Agent': 'com.nintendo.znca/' + nsoAppVersion + ' (Android/7.1.2)',
+            'Accept': 'application/json',
+            'X-ProductVersion': nsoAppVersion,
+            'Content-Type': 'application/json; charset=utf-8',
+            'Connection': 'Keep-Alive',
+            'Authorization': 'Bearer',
+            'X-Platform': 'Android',
+            'Accept-Encoding': 'gzip'
+        }
+
+        self.url = 'https://api-lp1.znc.srv.nintendo.net'
+        self.timestamp = int(time.time()) * 1000  # Convert from iOS to Android
+        self.guid = guid
+
+        self.userInfo = userInfo
+        self.accessToken = accessToken
+        self.na_id = userInfo['id']
+
+        self.imink = imink(self.na_id, self.accessToken, self.timestamp, self.guid, 1).get()
+
+        if 'error' in self.imink or self.imink.get('error') is not None:
+            iminkApiError = (
+                'Authentication with imink failed. \n\n'
+                'Please follow these steps to resolve the issue:\n'
+                '1. First, check the "F Calculation API" status on the imink API status page: https://status.imink.app/ \n'
+                '2. If the F Calculation API is operational, ensure you are using the latest version of NSO-RPC.\n'
+                '3. If the issue persists, join the Discord or open a GitHub issue for further assistance.\n'
+                'Thank you for your patience!'
+            )
+            raise RuntimeError(iminkApiError) from None
+        else:
+            self.timestamp = int(self.imink['timestamp'])
+            self.guid = self.imink['request_id']
+
+            self.account = None
+
+    def loginToAccount(self):
+        route = '/v3/Account/Login'
+        body = {
+            'parameter': {
+                'f': self.imink['f'],
+                'naIdToken': self.accessToken,
+                'timestamp': self.timestamp,
+                'requestId': self.guid,
+                'naCountry': self.userInfo['country'],
+                'naBirthday': self.userInfo['birthday'],
+                'language': self.userInfo['language'],
+            },
+        }
+        response = requests.post(self.url + route, headers = self.headers, json = body, verify=False)
+        self.account = json.loads(response.text)
+        return self.account
+
+
+class User():
+    def __init__(self, f):
+        self.id = f.get('id')
+        self.nsaId = f.get('nsaId')
+        self.imageUri = f.get('imageUri')
+        self.image = None
+        self.name = f.get('name')
+        self.supportId = f.get('supportId')
+        self.isChildRestricted = f.get('isChildRestricted')
+        self.etag = f.get('etag')
+        self.links = f.get('links')
+        self.permissions = f.get('permissions')
+        self.presence = Presence(f.get('presence'))
+
+    def description(self):
+        return ('%s (id: %s, nsaId: %s):\n' % (self.name, self.id, self.nsaId)
+                + '   - Profile Picture: %s\n' % self.imageUri
+                + '   - Status: %s\n' % self.presence.description()
+                )
+
+
+class Friend(User):
+    def __init__(self, f):
+        super().__init__(f)
+        self.isFriend = f.get('isFriend')
+        self.isFavoriteFriend = f.get('isFavoriteFriend')
+        self.isServiceUser = f.get('isServiceUser')
+        self.friendCreatedAt = f.get('friendCreatedAt')
+
+    def description(self):
+        return ('%s (id: %s, nsaId: %s):\n' % (self.name, self.id, self.nsaId)
+                + '   - Profile Picture: %s\n' % self.imageUri
+                + '   - Is Favorite: %s\n' % self.isFavoriteFriend
+                + '   - Friend Creation Date: %s\n' % self.friendCreatedAt
+                + '   - Status: %s\n' % self.presence.description()
+                )
+
+
+class FriendList():
+    def __init__(self):
+        self.route = '/v3/Friend/List'  # Define API route
+
+        self.friendList = []  # List of Friend object(s)
+
+    def populateList(self, API: API):
+        response = API.makeRequest(self.route)
+        try:
+            arr = json.loads(response.text)['result']['friends']
+        except Exception as e:
+            log('Failure with authorization: %s\\Friends returns %s' % (e, response.text))
+            raise e
+        self.friendList = [Friend(friend) for friend in arr]
+
+
+class Presence():
+    def __init__(self, f):
+        self.state = f.get('state')
+        self.updatedAt = f.get('updatedAt')
+        self.logoutAt = f.get('logoutAt')
+        self.game = Game(f.get('game'))
+
+    def description(self):
+        return ('%s (updatedAt: %s, logoutAt: %s)\n' % (self.state, self.updatedAt, self.logoutAt)
+                + '   - Game: %s' % self.game.description()
+                )
+
+
+class Game():
+    def __init__(self, f):
+        self.name = f.get('name')
+        self.imageUri = f.get('imageUri')
+        self.shopUri = f.get('shopUri')
+        self.totalPlayTime = f.get('totalPlayTime')
+        self.firstPlayedAt = f.get('firstPlayedAt')
+        self.sysDescription = f.get('sysDescription')
+
+    def description(self):
+        return ('%s (sysDescription: %s)\n' % (self.name, self.sysDescription)
+                + '   - Game Icon: %s\n' % self.imageUri
+                + '   - Shop Uri: %s\n' % self.shopUri
+                + '   - Total Play Time: %s\n' % self.totalPlayTime
+                + '   - First Played At: %s' % self.firstPlayedAt
+                )
+
+
+class Session():
+    def __init__(self):
+        self.headers = {
+            'Accept-Encoding': 'gzip',
+            'User-Agent': 'OnlineLounge/%s NASDKAPI Android' % nsoAppVersion,
+        }
+        self.Session = requests.Session()
+
+    def login(self, receiveInput, *, altLink = None):
+        state = base64.urlsafe_b64encode(os.urandom(36))
+        verify = base64.urlsafe_b64encode(os.urandom(32))
+        authHash = hashlib.sha256()
+        authHash.update(verify.replace(b'=', b''))
+        authCodeChallenge = base64.urlsafe_b64encode(authHash.digest())
+
+        url = 'https://accounts.nintendo.com/connect/1.0.0/authorize'
+        params = {
+            'client_id': client_id,
+            'redirect_uri': 'npf%s://auth' % client_id,
+            'response_type': 'session_token_code',
+            'scope': 'openid user user.birthday user.mii user.screenName',
+            'session_token_code_challenge': authCodeChallenge.replace(b'=', b''),
+            'session_token_code_challenge_method': 'S256',
+            'state': state,
+            'theme': 'login_form'
+        }
+        response = self.Session.get(url, headers = self.headers, params = params, verify=False)
+
+        try:
+            webbrowser.open(response.history[0].url)
+        except Exception as e:
+            print(log(e))
+        print('Open this link: %s' % response.history[0].url)
+        if altLink:
+            altLink('<a href="%s" style="color: cyan;">Click here if your browser didn\'t open</a>' % response.history[0].url)
+        tokenPattern = re.compile(r'(eyJhbGciOiJIUzI1NiJ9\.[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*)')
+        code = tokenPattern.findall(receiveInput())[0]
+
+        return code, verify
+
+    def inputManually(self):
+        return input('After logging in, please copy the link from \'Select this account\' and enter it here:\n')
+
+    def run(self, code, verify):
+        url = 'https://accounts.nintendo.com/connect/1.0.0/api/session_token'
+        headers = self.headers
+        headers.update({
+            'Accept-Language': 'en-US',
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': '540',
+            'Host': 'accounts.nintendo.com',
+            'Connection': 'Keep-Alive',
+        })
+        body = {
+            'client_id': client_id,
+            'session_token_code': code,
+            'session_token_code_verifier': verify.replace(b'=', b''),
+        }
+        response = self.Session.post(url, data = body, headers = headers, verify=False)
+        return json.loads(response.text)['session_token']
