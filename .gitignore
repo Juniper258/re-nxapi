@@ -1,0 +1,28 @@
+# Authentication & Private Data
+private.txt
+tempToken.txt
+*.token
+*.log
+logs.txt
+settings.txt
+.env
+.env.*
+
+# Binaries (use GitHub Releases for large files)
+installers/*.AppImage
+installers/*.exe
+
+# Dependencies
+node_modules/
+dist/
+build/
+venv/
+.venv/
+
+# Python
+*.pyc
+__pycache__/
+
+# OS specific
+.DS_Store
+Thumbs.db
